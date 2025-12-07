@@ -117,9 +117,24 @@ EOF
     iptables -t nat -A POSTROUTING -s 10.8.0.0/24 -o $NIC -j MASQUERADE
     iptables-save > /etc/iptables/rules.v4
     
+    # Create systemd service link
+    ln -sf /lib/systemd/system/openvpn@.service /etc/systemd/system/multi-user.target.wants/openvpn@server.service
+    
     # Enable and start OpenVPN
+    systemctl daemon-reload
     systemctl enable openvpn@server
     systemctl start openvpn@server
+    
+    # Wait a bit for service to start
+    sleep 3
+    
+    # Check if started successfully
+    if systemctl is-active --quiet openvpn@server; then
+        echo -e "${GREEN}OpenVPN service started successfully!${NC}"
+    else
+        echo -e "${YELLOW}Warning: OpenVPN service may not have started. Checking logs...${NC}"
+        journalctl -u openvpn@server -n 20 --no-pager
+    fi
     
     # Create client template
     cat > /etc/openvpn/client-template.txt << EOF
@@ -286,13 +301,26 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (isset($_POST['add_client'])) {
         $clientName = trim($_POST['client_name']);
         if (!empty($clientName) && preg_match('/^[a-zA-Z0-9_-]+$/', $clientName)) {
-            $cmd = "cd " . EASYRSA_DIR . " && sudo ./easyrsa build-client-full '$clientName' nopass 2>&1";
-            exec($cmd, $output, $return);
-            
-            if ($return === 0) {
-                // Create client config
-                $serverIP = trim(shell_exec('curl -s ifconfig.me'));
-                $clientConfig = "client
+            // Check if client already exists
+            if (file_exists(EASYRSA_DIR . "/pki/issued/$clientName.crt")) {
+                $message = "Client '$clientName' sudah ada!";
+                $messageType = 'warning';
+            } else {
+                // Use wrapper script
+                $cmd = "sudo /usr/local/bin/openvpn-add-client " . escapeshellarg($clientName) . " 2>&1";
+                exec($cmd, $output, $return);
+                
+                if ($return === 0) {
+                    // Wait a bit for files to be created
+                    sleep(1);
+                    
+                    // Create client config
+                    $serverIP = trim(shell_exec('curl -s ifconfig.me'));
+                    if (empty($serverIP)) {
+                        $serverIP = trim(shell_exec('hostname -I | awk \'{print $1}\''));
+                    }
+                    
+                    $clientConfig = "client
 dev tun
 proto udp
 remote $serverIP 1194
@@ -305,19 +333,31 @@ cipher AES-256-CBC
 verb 3
 key-direction 1
 ";
-                // Add certificates
-                $clientConfig .= "\n<ca>\n" . file_get_contents(OPENVPN_DIR . '/ca.crt') . "</ca>\n";
-                $clientConfig .= "\n<cert>\n" . file_get_contents(EASYRSA_DIR . "/pki/issued/$clientName.crt") . "</cert>\n";
-                $clientConfig .= "\n<key>\n" . file_get_contents(EASYRSA_DIR . "/pki/private/$clientName.key") . "</key>\n";
-                $clientConfig .= "\n<tls-auth>\n" . file_get_contents(OPENVPN_DIR . '/ta.key') . "</tls-auth>\n";
-                
-                file_put_contents(CLIENTS_DIR . "/$clientName.ovpn", $clientConfig);
-                
-                $message = "Client '$clientName' berhasil ditambahkan!";
-                $messageType = 'success';
-            } else {
-                $message = "Gagal menambahkan client: " . implode("\n", $output);
-                $messageType = 'danger';
+                    // Add certificates
+                    $ca = @file_get_contents(OPENVPN_DIR . '/ca.crt');
+                    $cert = @file_get_contents(EASYRSA_DIR . "/pki/issued/$clientName.crt");
+                    $key = @file_get_contents(EASYRSA_DIR . "/pki/private/$clientName.key");
+                    $ta = @file_get_contents(OPENVPN_DIR . '/ta.key');
+                    
+                    if ($ca && $cert && $key && $ta) {
+                        $clientConfig .= "\n<ca>\n" . $ca . "</ca>\n";
+                        $clientConfig .= "\n<cert>\n" . $cert . "</cert>\n";
+                        $clientConfig .= "\n<key>\n" . $key . "</key>\n";
+                        $clientConfig .= "\n<tls-auth>\n" . $ta . "</tls-auth>\n";
+                        
+                        file_put_contents(CLIENTS_DIR . "/$clientName.ovpn", $clientConfig);
+                        chmod(CLIENTS_DIR . "/$clientName.ovpn", 0644);
+                        
+                        $message = "Client '$clientName' berhasil ditambahkan!";
+                        $messageType = 'success';
+                    } else {
+                        $message = "Client dibuat tetapi gagal membaca certificate files. Error: " . implode(" ", $output);
+                        $messageType = 'warning';
+                    }
+                } else {
+                    $message = "Gagal menambahkan client: " . implode("<br>", array_map('htmlspecialchars', $output));
+                    $messageType = 'danger';
+                }
             }
         } else {
             $message = "Nama client tidak valid! Gunakan huruf, angka, underscore, atau dash.";
@@ -326,10 +366,10 @@ key-direction 1
     }
     
     if (isset($_POST['delete_client'])) {
-        $clientName = $_POST['client_name'];
+        $clientName = trim($_POST['client_name']);
         
-        // Revoke certificate
-        $cmd = "cd " . EASYRSA_DIR . " && sudo ./easyrsa revoke '$clientName' 2>&1 && sudo ./easyrsa gen-crl 2>&1";
+        // Revoke certificate using wrapper script
+        $cmd = "sudo /usr/local/bin/openvpn-delete-client " . escapeshellarg($clientName) . " 2>&1";
         exec($cmd, $output, $return);
         
         // Remove config file
@@ -341,11 +381,17 @@ key-direction 1
     
     if (isset($_POST['restart_server'])) {
         exec('sudo systemctl restart openvpn@server 2>&1', $output, $return);
-        if ($return === 0) {
+        sleep(2); // Wait for service to restart
+        
+        // Check if actually running
+        exec('sudo systemctl is-active openvpn@server', $statusOutput, $statusReturn);
+        
+        if ($statusReturn === 0) {
             $message = "OpenVPN server berhasil direstart!";
             $messageType = 'success';
         } else {
-            $message = "Gagal restart server!";
+            $errorLog = shell_exec('sudo journalctl -u openvpn@server -n 10 --no-pager 2>&1');
+            $message = "Gagal restart server! Log: <pre>" . htmlspecialchars($errorLog) . "</pre>";
             $messageType = 'danger';
         }
     }
@@ -697,15 +743,63 @@ PHPEOF
     chmod 755 /etc/openvpn
     chmod 755 /etc/openvpn/clients
     chmod 755 /etc/openvpn/easy-rsa
+    chmod 755 /etc/openvpn/easy-rsa/pki
+    chmod -R 644 /etc/openvpn/clients/*.ovpn 2>/dev/null || true
+    
+    # Create wrapper scripts for web panel (more secure than direct sudo)
+    cat > /usr/local/bin/openvpn-add-client << 'WRAPPEREOF'
+#!/bin/bash
+CLIENT_NAME=$1
+if [[ -z "$CLIENT_NAME" ]]; then
+    echo "Error: Client name required"
+    exit 1
+fi
+
+cd /etc/openvpn/easy-rsa
+./easyrsa build-client-full "$CLIENT_NAME" nopass
+exit $?
+WRAPPEREOF
+    chmod +x /usr/local/bin/openvpn-add-client
+    
+    cat > /usr/local/bin/openvpn-delete-client << 'WRAPPEREOF'
+#!/bin/bash
+CLIENT_NAME=$1
+if [[ -z "$CLIENT_NAME" ]]; then
+    echo "Error: Client name required"
+    exit 1
+fi
+
+cd /etc/openvpn/easy-rsa
+./easyrsa revoke "$CLIENT_NAME" <<EOF
+yes
+EOF
+./easyrsa gen-crl
+cp pki/crl.pem /etc/openvpn/
+exit $?
+WRAPPEREOF
+    chmod +x /usr/local/bin/openvpn-delete-client
     
     # Configure sudoers for web panel
     cat > /etc/sudoers.d/openvpn-panel << 'SUDOEOF'
-www-data ALL=(ALL) NOPASSWD: /etc/openvpn/easy-rsa/easyrsa
+# Allow www-data to manage OpenVPN
+www-data ALL=(ALL) NOPASSWD: /usr/local/bin/openvpn-add-client
+www-data ALL=(ALL) NOPASSWD: /usr/local/bin/openvpn-delete-client
 www-data ALL=(ALL) NOPASSWD: /bin/systemctl restart openvpn@server
 www-data ALL=(ALL) NOPASSWD: /bin/systemctl status openvpn@server
 www-data ALL=(ALL) NOPASSWD: /bin/systemctl is-active openvpn@server
+www-data ALL=(ALL) NOPASSWD: /bin/systemctl start openvpn@server
+www-data ALL=(ALL) NOPASSWD: /bin/systemctl stop openvpn@server
+www-data ALL=(ALL) NOPASSWD: /usr/bin/journalctl -u openvpn@server *
 SUDOEOF
     chmod 0440 /etc/sudoers.d/openvpn-panel
+    
+    # Validate sudoers file
+    visudo -c -f /etc/sudoers.d/openvpn-panel
+    if [[ $? -ne 0 ]]; then
+        echo -e "${RED}Error: Invalid sudoers configuration${NC}"
+        rm /etc/sudoers.d/openvpn-panel
+        exit 1
+    fi
     
     # Create Apache config
     cat > /etc/apache2/sites-available/openvpn-panel.conf << 'APACHEEOF'

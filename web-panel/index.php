@@ -116,13 +116,25 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (isset($_POST['add_client'])) {
         $clientName = trim($_POST['client_name']);
         if (!empty($clientName) && preg_match('/^[a-zA-Z0-9_-]+$/', $clientName)) {
-            $cmd = "cd " . EASYRSA_DIR . " && ./easyrsa build-client-full '$clientName' nopass 2>&1";
-            exec($cmd, $output, $return);
-            
-            if ($return === 0) {
-                // Create client config
-                $serverIP = trim(shell_exec('curl -s ifconfig.me'));
-                $clientConfig = "client
+            // Check if client already exists
+            if (file_exists(EASYRSA_DIR . "/pki/issued/$clientName.crt")) {
+                $message = "Client '$clientName' sudah ada!";
+                $messageType = 'warning';
+            } else {
+                // Use wrapper script
+                $cmd = "sudo /usr/local/bin/openvpn-add-client " . escapeshellarg($clientName) . " 2>&1";
+                exec($cmd, $output, $return);
+                
+                if ($return === 0) {
+                    sleep(1); // Wait for files
+                    
+                    // Create client config
+                    $serverIP = trim(shell_exec('curl -s ifconfig.me'));
+                    if (empty($serverIP)) {
+                        $serverIP = trim(shell_exec('hostname -I | awk \'{print $1}\''));
+                    }
+                    
+                    $clientConfig = "client
 dev tun
 proto udp
 remote $serverIP 1194
@@ -135,19 +147,31 @@ cipher AES-256-CBC
 verb 3
 key-direction 1
 ";
-                // Add certificates
-                $clientConfig .= "\n<ca>\n" . file_get_contents(OPENVPN_DIR . '/ca.crt') . "</ca>\n";
-                $clientConfig .= "\n<cert>\n" . file_get_contents(EASYRSA_DIR . "/pki/issued/$clientName.crt") . "</cert>\n";
-                $clientConfig .= "\n<key>\n" . file_get_contents(EASYRSA_DIR . "/pki/private/$clientName.key") . "</key>\n";
-                $clientConfig .= "\n<tls-auth>\n" . file_get_contents(OPENVPN_DIR . '/ta.key') . "</tls-auth>\n";
-                
-                file_put_contents(CLIENTS_DIR . "/$clientName.ovpn", $clientConfig);
-                
-                $message = "Client '$clientName' berhasil ditambahkan!";
-                $messageType = 'success';
-            } else {
-                $message = "Gagal menambahkan client: " . implode("\n", $output);
-                $messageType = 'danger';
+                    // Add certificates
+                    $ca = @file_get_contents(OPENVPN_DIR . '/ca.crt');
+                    $cert = @file_get_contents(EASYRSA_DIR . "/pki/issued/$clientName.crt");
+                    $key = @file_get_contents(EASYRSA_DIR . "/pki/private/$clientName.key");
+                    $ta = @file_get_contents(OPENVPN_DIR . '/ta.key');
+                    
+                    if ($ca && $cert && $key && $ta) {
+                        $clientConfig .= "\n<ca>\n" . $ca . "</ca>\n";
+                        $clientConfig .= "\n<cert>\n" . $cert . "</cert>\n";
+                        $clientConfig .= "\n<key>\n" . $key . "</key>\n";
+                        $clientConfig .= "\n<tls-auth>\n" . $ta . "</tls-auth>\n";
+                        
+                        file_put_contents(CLIENTS_DIR . "/$clientName.ovpn", $clientConfig);
+                        chmod(CLIENTS_DIR . "/$clientName.ovpn", 0644);
+                        
+                        $message = "Client '$clientName' berhasil ditambahkan!";
+                        $messageType = 'success';
+                    } else {
+                        $message = "Client dibuat tetapi gagal membaca files";
+                        $messageType = 'warning';
+                    }
+                } else {
+                    $message = "Gagal menambahkan client: " . implode("<br>", array_map('htmlspecialchars', $output));
+                    $messageType = 'danger';
+                }
             }
         } else {
             $message = "Nama client tidak valid! Gunakan huruf, angka, underscore, atau dash.";
@@ -159,7 +183,7 @@ key-direction 1
         $clientName = $_POST['client_name'];
         
         // Revoke certificate
-        $cmd = "cd " . EASYRSA_DIR . " && ./easyrsa revoke '$clientName' 2>&1 && ./easyrsa gen-crl 2>&1";
+        $cmd = "sudo /usr/local/bin/openvpn-delete-client " . escapeshellarg($clientName) . " 2>&1";
         exec($cmd, $output, $return);
         
         // Remove config file
@@ -170,12 +194,18 @@ key-direction 1
     }
     
     if (isset($_POST['restart_server'])) {
-        exec('systemctl restart openvpn@server 2>&1', $output, $return);
-        if ($return === 0) {
+        exec('sudo systemctl restart openvpn@server 2>&1', $output, $return);
+        sleep(2);
+        
+        // Check if running
+        exec('sudo systemctl is-active openvpn@server', $statusOutput, $statusReturn);
+        
+        if ($statusReturn === 0) {
             $message = "OpenVPN server berhasil direstart!";
             $messageType = 'success';
         } else {
-            $message = "Gagal restart server!";
+            $errorLog = shell_exec('sudo journalctl -u openvpn@server -n 10 --no-pager 2>&1');
+            $message = "Gagal restart server! Log: <pre>" . htmlspecialchars($errorLog) . "</pre>";
             $messageType = 'danger';
         }
     }

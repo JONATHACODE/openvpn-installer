@@ -231,6 +231,22 @@ sudo openvpn --config NAMA_CLIENT.ovpn
 
 ## Troubleshooting
 
+### Gunakan Script Fix Otomatis
+
+Jika mengalami masalah, jalankan script fix otomatis:
+
+```bash
+wget https://raw.githubusercontent.com/JONATHACODE/openvpn-installer/main/fix-openvpn.sh -O fix-openvpn.sh && chmod +x fix-openvpn.sh && sudo ./fix-openvpn.sh
+```
+
+Script ini akan otomatis:
+- Cek status OpenVPN
+- Memperbaiki permission files
+- Mengecek dan memperbaiki konfigurasi
+- Mengaktifkan IP forwarding
+- Memperbaiki iptables rules
+- Menampilkan log error jika ada
+
 ### OpenVPN tidak bisa start
 
 Cek log:
@@ -243,6 +259,29 @@ sudo journalctl -u openvpn@server -n 50
 1. Cek firewall di VPS
 2. Pastikan port 1194 UDP terbuka
 3. Cek status server dengan menu 5
+4. **Jalankan fix script**: `sudo ./fix-openvpn.sh`
+
+### Web Panel Error: "sudo: no tty present"
+
+Ini sudah diperbaiki di versi terbaru. Jika masih error:
+
+```bash
+# Cek sudoers configuration
+sudo visudo -c -f /etc/sudoers.d/openvpn-panel
+
+# Re-install web panel
+sudo ./openvpn-installer.sh
+# Pilih menu untuk install web panel
+```
+
+### Permission Denied di Web Panel
+
+```bash
+sudo chmod 755 /etc/openvpn
+sudo chmod 755 /etc/openvpn/clients
+sudo chmod 755 /etc/openvpn/easy-rsa
+sudo chown -R www-data:www-data /var/www/openvpn-panel
+```
 
 ### Melihat log real-time
 
