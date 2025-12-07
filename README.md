@@ -5,11 +5,14 @@ Script instalasi otomatis OpenVPN server dengan menu management yang mudah digun
 ## Fitur
 
 - ✅ Instalasi OpenVPN otomatis 1 klik
-- ✅ Menu interaktif untuk management
-- ✅ Menambah client/user baru
-- ✅ Menghapus client/user
+- ✅ **Web Control Panel** untuk management via browser
+- ✅ Menu interaktif CLI untuk management
+- ✅ Menambah client/user baru (via web & CLI)
+- ✅ Menghapus client/user (via web & CLI)
 - ✅ List semua client
-- ✅ Monitoring status server
+- ✅ Monitoring status server & client terkoneksi
+- ✅ Download file .ovpn langsung dari web panel
+- ✅ Real-time monitoring bandwidth usage
 - ✅ Restart OpenVPN service
 - ✅ Uninstall OpenVPN
 - ✅ Generate file .ovpn otomatis
@@ -69,6 +72,56 @@ Script akan:
 - Konfigurasi server OpenVPN
 - Setup firewall dan IP forwarding
 - Start OpenVPN service
+- Menanyakan apakah ingin install Web Control Panel
+
+Setelah instalasi selesai, Anda akan mendapat URL web panel:
+```
+http://IP_SERVER_ANDA
+```
+
+### 🌐 Web Control Panel
+
+Setelah install, akses web panel melalui browser:
+
+**URL**: `http://IP_SERVER_ANDA`
+
+**Login Default**:
+- Username: `admin`
+- Password: `admin123`
+
+⚠️ **Segera ganti password** setelah login pertama!
+
+#### Fitur Web Panel:
+
+**Dashboard**:
+- Status server (Running/Stopped)
+- Jumlah total client
+- Client yang sedang aktif/terkoneksi
+- Tombol restart server
+
+**Kelola Client**:
+- Tambah client baru dengan form
+- List semua client terdaftar
+- Download file .ovpn langsung dari browser
+- Hapus client
+
+**Client Terkoneksi**:
+- Lihat real-time client yang sedang connect
+- Monitor IP address client
+- Monitor bandwidth (data received/sent)
+- Waktu koneksi
+
+#### Ganti Password Web Panel:
+
+Edit file `/var/www/openvpn-panel/index.php`:
+```bash
+sudo nano /var/www/openvpn-panel/index.php
+```
+
+Cari dan ganti baris:
+```php
+define('ADMIN_PASSWORD', 'admin123'); // Ganti dengan password baru
+```
 
 ### 2. Menambah Client/User Baru
 
@@ -203,21 +256,49 @@ Jika menggunakan UFW:
 
 ```bash
 sudo ufw allow 1194/udp
+sudo ufw allow 80/tcp
+sudo ufw allow 443/tcp
 sudo ufw allow OpenSSH
 sudo ufw enable
 ```
 
-Jika menggunakan cloud provider (AWS, GCP, Azure), pastikan security group mengizinkan port 1194 UDP.
+**Port yang digunakan**:
+- **1194/UDP**: OpenVPN server
+- **80/TCP**: Web Control Panel (HTTP)
+- **443/TCP**: Web Control Panel (HTTPS - jika sudah setup SSL)
+- **22/TCP**: SSH
+
+Jika menggunakan cloud provider (AWS, GCP, Azure, DigitalOcean), pastikan security group mengizinkan:
+- Port **1194 UDP** untuk OpenVPN
+- Port **80 TCP** untuk Web Panel
 
 ## Security Tips
 
-1. Gunakan password yang kuat untuk VPS
-2. Disable root login SSH
-3. Gunakan SSH key authentication
-4. Enable 2FA jika memungkinkan
-5. Regularly update system: `sudo apt update && sudo apt upgrade`
-6. Monitor log secara berkala
-7. Hapus client yang tidak digunakan
+1. **Ganti password web panel** setelah instalasi pertama
+2. Gunakan password yang kuat untuk VPS dan web panel
+3. Setup SSL/HTTPS untuk web panel (gunakan Let's Encrypt)
+4. Disable root login SSH
+5. Gunakan SSH key authentication
+6. Enable 2FA jika memungkinkan
+7. Batasi akses web panel hanya dari IP tertentu (optional)
+8. Regularly update system: `sudo apt update && sudo apt upgrade`
+9. Monitor log secara berkala
+10. Hapus client yang tidak digunakan
+
+### Setup SSL/HTTPS (Recommended)
+
+Install Certbot untuk SSL gratis:
+
+```bash
+sudo apt install certbot python3-certbot-apache
+sudo certbot --apache -d yourdomain.com
+```
+
+Atau akses web panel hanya dari localhost dengan SSH tunnel:
+```bash
+ssh -L 8080:localhost:80 root@IP_SERVER
+```
+Lalu buka browser: `http://localhost:8080`
 
 ## File Penting
 
@@ -225,6 +306,9 @@ Jika menggunakan cloud provider (AWS, GCP, Azure), pastikan security group mengi
 - Certificates: `/etc/openvpn/easy-rsa/pki/`
 - Client configs: `/etc/openvpn/clients/`
 - Log status: `/etc/openvpn/openvpn-status.log`
+- Web panel: `/var/www/openvpn-panel/`
+- Apache config: `/etc/apache2/sites-available/openvpn-panel.conf`
+- Apache logs: `/var/log/apache2/openvpn-panel-*.log`
 
 ## Uninstall
 
